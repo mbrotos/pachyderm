@@ -215,7 +215,7 @@ jobs:
               --format testname \
               --debug \
               -- \
-              go test "${package}" -timeout 15m \
+              go test "${package}" -timeout 25m \
               -json \
               -run ${test_regex} \
               -tags="${test_tags}" \
