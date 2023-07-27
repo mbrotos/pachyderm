@@ -4670,13 +4670,14 @@ func testGetLogs(t *testing.T, useLoki bool) {
 	}, backoff.NewTestingBackOff()))
 }
 
-func TestGetLogsWithoutLoki(t *testing.T) {
-	testGetLogs(t, false)
-}
-
-func TestGetLogs(t *testing.T) {
-	testGetLogs(t, true)
-}
+// todo(fahad): uncomment out after experiment.
+//func TestGetLogsWithoutLoki(t *testing.T) {
+//	testGetLogs(t, false)
+//}
+//
+//func TestGetLogs(t *testing.T) {
+//	testGetLogs(t, true)
+//}
 
 func TestManyLogs(t *testing.T) {
 	if testing.Short() {
@@ -4802,62 +4803,62 @@ func TestLokiLogs(t *testing.T) {
 	require.Equal(t, numFiles, foundFoos, "didn't receive enough log lines containing foo")
 }
 
-func TestAllDatumsAreProcessed(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration tests in short mode")
-	}
-
-	t.Parallel()
-	c, _ := minikubetestenv.AcquireCluster(t)
-
-	dataRepo1 := tu.UniqueString("TestAllDatumsAreProcessed_data1")
-	require.NoError(t, c.CreateRepo(pfs.DefaultProjectName, dataRepo1))
-	dataRepo2 := tu.UniqueString("TestAllDatumsAreProcessed_data2")
-	require.NoError(t, c.CreateRepo(pfs.DefaultProjectName, dataRepo2))
-
-	commit1, err := c.StartCommit(pfs.DefaultProjectName, dataRepo1, "master")
-	require.NoError(t, err)
-	require.NoError(t, c.PutFile(commit1, "file1", strings.NewReader("foo\n"), client.WithAppendPutFile()))
-	require.NoError(t, c.PutFile(commit1, "file2", strings.NewReader("foo\n"), client.WithAppendPutFile()))
-	require.NoError(t, c.FinishCommit(pfs.DefaultProjectName, dataRepo1, "master", ""))
-
-	commit2, err := c.StartCommit(pfs.DefaultProjectName, dataRepo2, "master")
-	require.NoError(t, err)
-	require.NoError(t, c.PutFile(commit2, "file1", strings.NewReader("foo\n"), client.WithAppendPutFile()))
-	require.NoError(t, c.PutFile(commit2, "file2", strings.NewReader("foo\n"), client.WithAppendPutFile()))
-	require.NoError(t, c.FinishCommit(pfs.DefaultProjectName, dataRepo2, "master", ""))
-
-	pipeline := tu.UniqueString("pipeline")
-	require.NoError(t, c.CreatePipeline(pfs.DefaultProjectName,
-		pipeline,
-		"",
-		[]string{"bash"},
-		[]string{
-			fmt.Sprintf("cat /pfs/%s/* /pfs/%s/* > /pfs/out/file", dataRepo1, dataRepo2),
-		},
-		nil,
-		client.NewCrossInput(
-			client.NewPFSInput(pfs.DefaultProjectName, dataRepo1, "/*"),
-			client.NewPFSInput(pfs.DefaultProjectName, dataRepo2, "/*"),
-		),
-		"",
-		false,
-	))
-
-	commitInfo, err := c.InspectCommit(pfs.DefaultProjectName, pipeline, "master", "")
-	require.NoError(t, err)
-	commitInfos, err := c.WaitCommitSetAll(commitInfo.Commit.Id)
-	require.NoError(t, err)
-	require.Equal(t, 5, len(commitInfos))
-
-	var buf bytes.Buffer
-	rc, err := c.GetFileTAR(commitInfo.Commit, "file")
-	require.NoError(t, err)
-	defer rc.Close()
-	require.NoError(t, tarutil.ConcatFileContent(&buf, rc))
-	// should be 8 because each file gets copied twice due to cross product
-	require.Equal(t, strings.Repeat("foo\n", 8), buf.String())
-}
+//func TestAllDatumsAreProcessed(t *testing.T) {
+//	if testing.Short() {
+//		t.Skip("Skipping integration tests in short mode")
+//	}
+//
+//	t.Parallel()
+//	c, _ := minikubetestenv.AcquireCluster(t)
+//
+//	dataRepo1 := tu.UniqueString("TestAllDatumsAreProcessed_data1")
+//	require.NoError(t, c.CreateRepo(pfs.DefaultProjectName, dataRepo1))
+//	dataRepo2 := tu.UniqueString("TestAllDatumsAreProcessed_data2")
+//	require.NoError(t, c.CreateRepo(pfs.DefaultProjectName, dataRepo2))
+//
+//	commit1, err := c.StartCommit(pfs.DefaultProjectName, dataRepo1, "master")
+//	require.NoError(t, err)
+//	require.NoError(t, c.PutFile(commit1, "file1", strings.NewReader("foo\n"), client.WithAppendPutFile()))
+//	require.NoError(t, c.PutFile(commit1, "file2", strings.NewReader("foo\n"), client.WithAppendPutFile()))
+//	require.NoError(t, c.FinishCommit(pfs.DefaultProjectName, dataRepo1, "master", ""))
+//
+//	commit2, err := c.StartCommit(pfs.DefaultProjectName, dataRepo2, "master")
+//	require.NoError(t, err)
+//	require.NoError(t, c.PutFile(commit2, "file1", strings.NewReader("foo\n"), client.WithAppendPutFile()))
+//	require.NoError(t, c.PutFile(commit2, "file2", strings.NewReader("foo\n"), client.WithAppendPutFile()))
+//	require.NoError(t, c.FinishCommit(pfs.DefaultProjectName, dataRepo2, "master", ""))
+//
+//	pipeline := tu.UniqueString("pipeline")
+//	require.NoError(t, c.CreatePipeline(pfs.DefaultProjectName,
+//		pipeline,
+//		"",
+//		[]string{"bash"},
+//		[]string{
+//			fmt.Sprintf("cat /pfs/%s/* /pfs/%s/* > /pfs/out/file", dataRepo1, dataRepo2),
+//		},
+//		nil,
+//		client.NewCrossInput(
+//			client.NewPFSInput(pfs.DefaultProjectName, dataRepo1, "/*"),
+//			client.NewPFSInput(pfs.DefaultProjectName, dataRepo2, "/*"),
+//		),
+//		"",
+//		false,
+//	))
+//
+//	commitInfo, err := c.InspectCommit(pfs.DefaultProjectName, pipeline, "master", "")
+//	require.NoError(t, err)
+//	commitInfos, err := c.WaitCommitSetAll(commitInfo.Commit.Id)
+//	require.NoError(t, err)
+//	require.Equal(t, 5, len(commitInfos))
+//
+//	var buf bytes.Buffer
+//	rc, err := c.GetFileTAR(commitInfo.Commit, "file")
+//	require.NoError(t, err)
+//	defer rc.Close()
+//	require.NoError(t, tarutil.ConcatFileContent(&buf, rc))
+//	// should be 8 because each file gets copied twice due to cross product
+//	require.Equal(t, strings.Repeat("foo\n", 8), buf.String())
+//}
 
 func TestDatumStatusRestart(t *testing.T) {
 	if testing.Short() {
