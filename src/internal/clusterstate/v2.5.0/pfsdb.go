@@ -2,6 +2,8 @@ package v2_5_0
 
 import (
 	"context"
+	col "github.com/pachyderm/pachyderm/v2/src/internal/collection"
+	pfsserver "github.com/pachyderm/pachyderm/v2/src/server/pfs"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -13,6 +15,29 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/pachyderm/pachyderm/v2/src/internal/uuid"
 )
+
+func Projects(db *pachsql.DB, listener col.PostgresListener) col.PostgresCollection {
+	return col.NewPostgresCollection(
+		"projects",
+		db,
+		listener,
+		&pfs.ProjectInfo{},
+		nil,
+		col.WithKeyGen(func(key interface{}) (string, error) {
+			if project, ok := key.(*pfs.Project); !ok {
+				return "", errors.New("key must be a project")
+			} else {
+				return project.Name, nil
+			}
+		}),
+		col.WithNotFoundMessage(func(key interface{}) string {
+			return pfsserver.ErrProjectNotFound{Project: key.(*pfs.Project)}.Error()
+		}),
+		col.WithExistsMessage(func(key interface{}) string {
+			return pfsserver.ErrProjectExists{Project: key.(*pfs.Project)}.Error()
+		}),
+	)
+}
 
 var reposTypeIndex = &index{
 	Name: "type",

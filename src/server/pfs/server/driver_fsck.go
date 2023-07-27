@@ -365,22 +365,28 @@ func (d *driver) fsck(ctx context.Context, fix bool, cb func(*pfs.FsckResponse) 
 	branchInfos := make(map[string]*pfs.BranchInfo)
 	commitInfos := make(map[string]*pfs.CommitInfo)
 	repoInfos := make(map[string]*pfs.RepoInfo)
-	repoInfo := &pfs.RepoInfo{}
-	if err := d.repos.ReadOnly(ctx).List(repoInfo, col.DefaultOptions(), func(string) error {
-		repoInfos[pfsdb.RepoKey(repoInfo.Repo)] = proto.Clone(repoInfo).(*pfs.RepoInfo)
-		commitInfo := &pfs.CommitInfo{}
-		if err := d.commits.ReadOnly(ctx).GetByIndex(pfsdb.CommitsRepoIndex, pfsdb.RepoKey(repoInfo.Repo), commitInfo, col.DefaultOptions(), func(string) error {
-			commitInfos[pfsdb.CommitKey(commitInfo.Commit)] = proto.Clone(commitInfo).(*pfs.CommitInfo)
-			return nil
-		}); err != nil {
-			return errors.EnsureStack(err)
+	if err := dbutil.WithTx(ctx, d.env.DB, func(ctx context.Context, tx *pachsql.Tx) error {
+		repoIter, err := pfsdb.ListRepo(ctx, tx)
+		if err != nil {
+			return errors.Wrap(err, "fsck: create repo iterator")
 		}
-		branchInfo := &pfs.BranchInfo{}
-		err := d.branches.ReadOnly(ctx).GetByIndex(pfsdb.BranchesRepoIndex, pfsdb.RepoKey(repoInfo.Repo), branchInfo, col.DefaultOptions(), func(string) error {
-			branchInfos[pfsdb.BranchKey(branchInfo.Branch)] = proto.Clone(branchInfo).(*pfs.BranchInfo)
-			return nil
-		})
-		return errors.EnsureStack(err)
+		return errors.Wrap(stream.ForEach[*pfs.RepoInfo](ctx, repoIter, func(repo *pfs.RepoInfo) error {
+			repoInfos[pfsdb.RepoKey(repo.Repo)] = repo
+			commitInfo := &pfs.CommitInfo{}
+			if err := d.commits.ReadOnly(ctx).GetByIndex(pfsdb.CommitsRepoIndex, pfsdb.RepoKey(repo.Repo), commitInfo, col.DefaultOptions(), func(string) error {
+				commitInfos[pfsdb.CommitKey(commitInfo.Commit)] = proto.Clone(commitInfo).(*pfs.CommitInfo)
+				return nil
+			}); err != nil {
+				return errors.EnsureStack(err)
+			}
+			branchInfo := &pfs.BranchInfo{}
+			err := d.branches.ReadOnly(ctx).GetByIndex(pfsdb.BranchesRepoIndex, pfsdb.RepoKey(repo.Repo), branchInfo, col.DefaultOptions(), func(string) error {
+				branchInfos[pfsdb.BranchKey(branchInfo.Branch)] = proto.Clone(branchInfo).(*pfs.BranchInfo)
+				return nil
+			})
+			return errors.EnsureStack(err)
+
+		}), "fsck: list repos")
 	}); err != nil {
 		return errors.EnsureStack(err)
 	}

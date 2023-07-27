@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"github.com/pachyderm/pachyderm/v2/src/internal/dbutil"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pfsdb"
 	"io"
 	"time"
 
@@ -98,15 +101,18 @@ func (a *apiServer) ActivateAuthInTransaction(ctx context.Context, txnCtx *txnco
 		return nil, errors.Wrap(err, "list projects")
 	}
 	// Create role bindings for repos created before auth activation
-	var repoInfo pfs.RepoInfo
-	if err := a.driver.repos.ReadWrite(txnCtx.SqlTx).List(&repoInfo, col.DefaultOptions(), func(string) error {
-		err := a.env.AuthServer.CreateRoleBindingInTransaction(txnCtx, "", nil, repoInfo.Repo.AuthResource())
+	repoIter, err := pfsdb.ListRepo(ctx, txnCtx.SqlTx)
+	if err != nil {
+		return nil, errors.Wrap(err, "list projects")
+	}
+	if err := stream.ForEach[*pfs.RepoInfo](ctx, repoIter, func(repo *pfs.RepoInfo) error {
+		err := a.env.AuthServer.CreateRoleBindingInTransaction(txnCtx, "", nil, repo.Repo.AuthResource())
 		if err != nil && !col.IsErrExists(err) {
 			return errors.EnsureStack(err)
 		}
 		return nil
 	}); err != nil {
-		return nil, errors.EnsureStack(err)
+		return nil, errors.Wrap(err, "list repos")
 	}
 	return &pfs.ActivateAuthResponse{}, nil
 }
@@ -133,9 +139,9 @@ func (a *apiServer) CreateRepo(ctx context.Context, request *pfs.CreateRepoReque
 
 // InspectRepoInTransaction is identical to InspectRepo except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) InspectRepoInTransaction(txnCtx *txncontext.TransactionContext, originalRequest *pfs.InspectRepoRequest) (*pfs.RepoInfo, error) {
+func (a *apiServer) InspectRepoInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, originalRequest *pfs.InspectRepoRequest) (*pfs.RepoInfo, error) {
 	request := proto.Clone(originalRequest).(*pfs.InspectRepoRequest)
-	return a.driver.inspectRepo(txnCtx, request.Repo, true)
+	return a.driver.inspectRepo(ctx, txnCtx, request.Repo, true)
 }
 
 // InspectRepo implements the protobuf pfs.InspectRepo RPC
@@ -145,11 +151,11 @@ func (a *apiServer) InspectRepo(ctx context.Context, request *pfs.InspectRepoReq
 	var size int64
 	if err := a.env.TxnEnv.WithReadContext(ctx, func(txnCtx *txncontext.TransactionContext) error {
 		var err error
-		repoInfo, err = a.InspectRepoInTransaction(txnCtx, request)
+		repoInfo, err = a.InspectRepoInTransaction(ctx, txnCtx, request)
 		if err != nil {
 			return err
 		}
-		size, err = a.driver.repoSize(txnCtx, repoInfo.Repo)
+		size, err = a.driver.repoSize(ctx, txnCtx, repoInfo.Repo)
 		return err
 	}); err != nil {
 		return nil, err
@@ -163,27 +169,31 @@ func (a *apiServer) InspectRepo(ctx context.Context, request *pfs.InspectRepoReq
 
 // ListRepo implements the protobuf pfs.ListRepo RPC
 func (a *apiServer) ListRepo(request *pfs.ListRepoRequest, srv pfs.API_ListRepoServer) (retErr error) {
-	return a.driver.listRepo(srv.Context(), true /* includeAuth */, request.Type, request.Projects, srv.Send)
+	return errors.Wrap(dbutil.WithTx(srv.Context(), a.env.DB, func(ctx context.Context, tx *pachsql.Tx) error {
+		return a.driver.txnEnv.WithWriteContext(ctx, func(txnCxt *txncontext.TransactionContext) error {
+			return a.driver.listRepoInTransaction(srv.Context(), txnCxt, true, request.Type, request.Projects, srv.Send)
+		})
+	}), "list repo")
 }
 
 // DeleteRepoInTransaction is identical to DeleteRepo except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) DeleteRepoInTransaction(txnCtx *txncontext.TransactionContext, request *pfs.DeleteRepoRequest) error {
-	return a.driver.deleteRepo(txnCtx, request.Repo, request.Force)
+func (a *apiServer) DeleteRepoInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, request *pfs.DeleteRepoRequest) error {
+	return a.driver.deleteRepo(ctx, txnCtx, request.Repo, request.Force)
 }
 
 // DeleteRepoInTransaction is identical to DeleteRepo except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) DeleteReposInTransaction(txnCtx *txncontext.TransactionContext, repos []*pfs.Repo, force bool) error {
+func (a *apiServer) DeleteReposInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, repos []*pfs.Repo, force bool) error {
 	var ris []*pfs.RepoInfo
 	for _, r := range repos {
-		ri, err := a.driver.inspectRepo(txnCtx, r, false) // evaluate auth in d.deleteReposHelper()
+		ri, err := a.driver.inspectRepo(ctx, txnCtx, r, false) // evaluate auth in d.deleteReposHelper()
 		if err != nil {
 			return errors.Wrap(err, "list repos for delete")
 		}
 		ris = append(ris, ri)
 	}
-	if _, err := a.driver.deleteReposHelper(txnCtx, ris, force); err != nil {
+	if _, err := a.driver.deleteReposHelper(ctx, txnCtx, ris, force); err != nil {
 		return err
 	}
 	return nil
@@ -222,8 +232,8 @@ func (a *apiServer) DeleteRepos(ctx context.Context, request *pfs.DeleteReposReq
 
 // StartCommitInTransaction is identical to StartCommit except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) StartCommitInTransaction(txnCtx *txncontext.TransactionContext, request *pfs.StartCommitRequest) (*pfs.Commit, error) {
-	return a.driver.startCommit(txnCtx, request.Parent, request.Branch, request.Description)
+func (a *apiServer) StartCommitInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, request *pfs.StartCommitRequest) (*pfs.Commit, error) {
+	return a.driver.startCommit(ctx, txnCtx, request.Parent, request.Branch, request.Description)
 }
 
 // StartCommit implements the protobuf pfs.StartCommit RPC
@@ -309,8 +319,8 @@ func (a *apiServer) ListCommitSet(request *pfs.ListCommitSetRequest, serv pfs.AP
 
 // SquashCommitSetInTransaction is identical to SquashCommitSet except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) SquashCommitSetInTransaction(txnCtx *txncontext.TransactionContext, request *pfs.SquashCommitSetRequest) error {
-	return a.driver.squashCommitSet(txnCtx, request.CommitSet)
+func (a *apiServer) SquashCommitSetInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, request *pfs.SquashCommitSetRequest) error {
+	return a.driver.squashCommitSet(ctx, txnCtx, request.CommitSet)
 }
 
 // SquashCommitSet implements the protobuf pfs.SquashCommitSet RPC
@@ -326,7 +336,7 @@ func (a *apiServer) SquashCommitSet(ctx context.Context, request *pfs.SquashComm
 // DropCommitSet implements the protobuf pfs.DropCommitSet RPC
 func (a *apiServer) DropCommitSet(ctx context.Context, request *pfs.DropCommitSetRequest) (response *emptypb.Empty, retErr error) {
 	if err := a.env.TxnEnv.WithWriteContext(ctx, func(txnCtx *txncontext.TransactionContext) error {
-		return a.driver.dropCommitSet(txnCtx, request.CommitSet)
+		return a.driver.dropCommitSet(ctx, txnCtx, request.CommitSet)
 	}); err != nil {
 		return nil, err
 	}
@@ -359,8 +369,8 @@ func (a *apiServer) FindCommits(request *pfs.FindCommitsRequest, srv pfs.API_Fin
 
 // CreateBranchInTransaction is identical to CreateBranch except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) CreateBranchInTransaction(txnCtx *txncontext.TransactionContext, request *pfs.CreateBranchRequest) error {
-	return a.driver.createBranch(txnCtx, request.Branch, request.Head, request.Provenance, request.Trigger)
+func (a *apiServer) CreateBranchInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, request *pfs.CreateBranchRequest) error {
+	return a.driver.createBranch(ctx, txnCtx, request.Branch, request.Head, request.Provenance, request.Trigger)
 }
 
 // CreateBranch implements the protobuf pfs.CreateBranch RPC
@@ -395,14 +405,14 @@ func (a *apiServer) ListBranch(request *pfs.ListBranchRequest, srv pfs.API_ListB
 		return a.driver.listBranch(srv.Context(), request.Reverse, srv.Send)
 	}
 	return a.env.TxnEnv.WithReadContext(srv.Context(), func(txnCtx *txncontext.TransactionContext) error {
-		return a.driver.listBranchInTransaction(txnCtx, request.Repo, request.Reverse, srv.Send)
+		return a.driver.listBranchInTransaction(srv.Context(), txnCtx, request.Repo, request.Reverse, srv.Send)
 	})
 }
 
 // DeleteBranchInTransaction is identical to DeleteBranch except that it can run
 // inside an existing postgres transaction.  This is not an RPC.
-func (a *apiServer) DeleteBranchInTransaction(txnCtx *txncontext.TransactionContext, request *pfs.DeleteBranchRequest) error {
-	return a.driver.deleteBranch(txnCtx, request.Branch, request.Force)
+func (a *apiServer) DeleteBranchInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, request *pfs.DeleteBranchRequest) error {
+	return a.driver.deleteBranch(ctx, txnCtx, request.Branch, request.Force)
 }
 
 // DeleteBranch implements the protobuf pfs.DeleteBranch RPC
@@ -659,7 +669,7 @@ func (a *apiServer) DeleteAll(ctx context.Context, request *emptypb.Empty) (resp
 	return &emptypb.Empty{}, nil
 }
 
-// Fsckimplements the protobuf pfs.Fsck RPC
+// Fsck implements the protobuf pfs.Fsck RPC
 func (a *apiServer) Fsck(request *pfs.FsckRequest, fsckServer pfs.API_FsckServer) (retErr error) {
 	ctx := fsckServer.Context()
 	if err := a.driver.fsck(ctx, request.Fix, func(resp *pfs.FsckResponse) error {
@@ -667,32 +677,35 @@ func (a *apiServer) Fsck(request *pfs.FsckRequest, fsckServer pfs.API_FsckServer
 	}); err != nil {
 		return err
 	}
-
 	if target := request.GetZombieTarget(); target != nil {
 		target.GetBranch().GetRepo().EnsureProject()
 		return a.driver.detectZombie(ctx, target, fsckServer.Send)
 	}
 	if request.GetZombieAll() {
-		// list meta repos as a proxy for finding pipelines
-		return a.driver.listRepo(ctx, false /* includeAuth */, pfs.MetaRepoType, nil /* projectsFilter */, func(info *pfs.RepoInfo) error {
-			// TODO: actually derive output branch from job/pipeline, currently that coupling causes issues
-			output := client.NewCommit(info.Repo.Project.GetName(), info.Repo.Name, "master", "")
-			for output != nil {
-				info, err := a.driver.inspectCommit(ctx, output, pfs.CommitState_STARTED)
-				if err != nil {
-					return err
-				}
-				// we will be reading the whole file system, so unfinished commits would be very slow
-				if info.Error == "" && info.Finished != nil {
-					break
-				}
-				output = info.ParentCommit
-			}
-			if output == nil {
-				return nil
-			}
-			return a.driver.detectZombie(ctx, output, fsckServer.Send)
-		})
+		return errors.Wrap(dbutil.WithTx(fsckServer.Context(), a.env.DB, func(ctx context.Context, tx *pachsql.Tx) error {
+			return a.driver.txnEnv.WithWriteContext(ctx, func(txnCxt *txncontext.TransactionContext) error {
+				// list meta repos as a proxy for finding pipelines
+				return a.driver.listRepoInTransaction(ctx, txnCxt, false /* includeAuth */, pfs.MetaRepoType, nil /* projectsFilter */, func(info *pfs.RepoInfo) error {
+					// TODO: actually derive output branch from job/pipeline, currently that coupling causes issues
+					output := client.NewCommit(info.Repo.Project.GetName(), info.Repo.Name, "master", "")
+					for output != nil {
+						info, err := a.driver.inspectCommit(ctx, output, pfs.CommitState_STARTED)
+						if err != nil {
+							return err
+						}
+						// we will be reading the whole file system, so unfinished commits would be very slow
+						if info.Error == "" && info.Finished != nil {
+							break
+						}
+						output = info.ParentCommit
+					}
+					if output == nil {
+						return nil
+					}
+					return a.driver.detectZombie(ctx, output, fsckServer.Send)
+				})
+			})
+		}), "list repo")
 	}
 	return nil
 }
