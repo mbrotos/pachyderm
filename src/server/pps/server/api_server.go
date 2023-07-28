@@ -2236,7 +2236,7 @@ func (a *apiServer) createPipeline(ctx context.Context, req *pps.CreatePipelineV
 		}
 	}
 	if err := a.txnEnv.WithTransaction(ctx, func(txn txnenv.Transaction) error {
-		return errors.EnsureStack(txn.CreatePipeline(request))
+		return errors.EnsureStack(txn.CreatePipeline(req))
 	}); err != nil {
 		return "", err
 	}
@@ -2357,7 +2357,11 @@ func (a *apiServer) initializePipelineInfo(request *pps.CreatePipelineRequest, o
 	return pipelineInfo, nil
 }
 
-func (a *apiServer) CreatePipelineInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, request *pps.CreatePipelineRequest) error {
+func (a *apiServer) CreatePipelineInTransaction(ctx context.Context, txnCtx *txncontext.TransactionContext, req *pps.CreatePipelineV2Request) error {
+	var request pps.CreatePipelineRequest
+	if err := protojson.Unmarshal([]byte(req.CreatePipelineRequestJson), &request); err != nil {
+		return errors.Wrap(err, "could not unmarshal create pipeline request")
+	}
 	var (
 		projectName          = request.Pipeline.Project.GetName()
 		pipelineName         = request.Pipeline.Name
@@ -2372,10 +2376,11 @@ func (a *apiServer) CreatePipelineInTransaction(ctx context.Context, txnCtx *txn
 			Pipeline: request.Pipeline,
 		}
 	}
-	newPipelineInfo, err := a.initializePipelineInfo(request, oldPipelineInfo)
+	newPipelineInfo, err := a.initializePipelineInfo(&request, oldPipelineInfo)
 	if err != nil {
 		return err
 	}
+	newPipelineInfo.DetailsJson = req.CreatePipelineRequestJson
 	// Verify that all input repos exist (create cron repos if necessary).
 	if visitErr := pps.VisitInput(newPipelineInfo.Details.Input, func(input *pps.Input) error {
 		if input.Pfs != nil {

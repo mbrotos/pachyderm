@@ -13,6 +13,7 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/pps"
 	pfspretty "github.com/pachyderm/pachyderm/v2/src/server/pfs/pretty"
 	"github.com/pachyderm/pachyderm/v2/src/transaction"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 const (
@@ -128,20 +129,24 @@ func sprintUpdateJobState(request *pps.UpdateJobStateRequest) string {
 	)
 }
 
-func sprintCreatePipeline(request *pps.CreatePipelineRequest) string {
+func sprintCreatePipeline(request *pps.CreatePipelineV2Request) (string, error) {
 	verb := "create"
 	if request.Update {
 		verb = "update"
 	}
-	return fmt.Sprintf("%s pipeline %s", verb, request.Pipeline)
+	var req pps.CreatePipelineRequest
+	if err := protojson.Unmarshal([]byte(request.CreatePipelineRequestJson), &req); err != nil {
+		return "", errors.Wrap(err, "could not unmarshal CreatePipelineRequest from CreatePipelineRequestV2")
+	}
+	return fmt.Sprintf("%s pipeline %s", verb, req.Pipeline), nil
 }
 
 func transactionRequests(
 	requests []*transaction.TransactionRequest,
 	responses []*transaction.TransactionResponse,
-) string {
+) (string, error) {
 	if len(requests) == 0 {
-		return "  -"
+		return "  -", nil
 	}
 
 	lines := []string{}
@@ -167,15 +172,19 @@ func transactionRequests(
 			line = sprintDeleteBranch(request.DeleteBranch)
 		} else if request.UpdateJobState != nil {
 			line = sprintUpdateJobState(request.UpdateJobState)
-		} else if request.CreatePipeline != nil {
-			line = sprintCreatePipeline(request.CreatePipeline)
+		} else if request.CreatePipelineV2 != nil {
+			var err error
+			line, err = sprintCreatePipeline(request.CreatePipelineV2)
+			if err != nil {
+				return "", errors.Wrap(err, "could not print CreatePipelineV2")
+			}
 		} else {
 			line = "ERROR (unknown request type)"
 		}
 		lines = append(lines, fmt.Sprintf("  %s", line))
 	}
 
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), nil
 }
 
 var funcMap = template.FuncMap{
